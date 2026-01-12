@@ -21,7 +21,7 @@ from dateutil import parser
 import rasters as rt
 import numpy as np
 import logging
-import colored_logging
+import colored_logging as cl
 
 from .constants import *
 
@@ -45,11 +45,13 @@ SM_CMAP = LinearSegmentedColormap.from_list("SM", [
     "#1839c5"
 ])
 
+logger = logging.getLogger(__name__)
+
 def generate_GFS_date_URL(date_UTC: date) -> str:
     if isinstance(date_UTC, str):
         date_UTC = parser.parse(date_UTC).date()
 
-    URL = f"https://www.ncei.noaa.gov/data/global-forecast-system/access/grid-004-0.5-degree/forecast/202109/"
+    URL = GFS_most_recent_month_address(year=date_UTC.year, month=date_UTC.month)
 
     return URL
 
@@ -71,9 +73,24 @@ def GFS_most_recent_month_address(year: int = None, month: int = None) -> str:
     if year is not None and month is not None:
         addresses = [address for address in addresses if datetime.strptime(posixpath.basename(address.strip("/")), "%Y%m") <= datetime(year, month, 1)]
 
-    most_recent_address = addresses[-1]
-
-    return most_recent_address
+    # Check addresses in reverse order to find the most recent one with content
+    for address in reversed(addresses):
+        try:
+            date_addresses = GFS_date_addresses_from_URL(address)
+            if date_addresses:  # Check if this month has any date directories
+                # Check if any of the date directories have files
+                for date_address in reversed(date_addresses):
+                    file_addresses = GFS_file_addresses(date_address)
+                    if file_addresses:  # This date directory has files
+                        return address
+        except Exception:
+            continue  # Skip this month if there's an error accessing it
+    
+    # If no month with content is found, return the most recent month (fallback)
+    if addresses:
+        return addresses[-1]
+    else:
+        raise ValueError("No GFS month addresses found")
 
 def GFS_date_addresses_from_URL(month_URL: str = None) -> List[str]:
     if month_URL is None:
@@ -105,9 +122,21 @@ def GFS_most_recent_date_address(date_UTC: date = None) -> str:
     
     addresses = GFS_date_addresses(year=date_UTC.year, month=date_UTC.month)
     addresses = [address for address in addresses if datetime.strptime(posixpath.basename(address.strip("/")), "%Y%m%d").date() <= date_UTC]
-    address = addresses[-1]
-
-    return address
+    
+    # Check addresses in reverse order to find the most recent one with files
+    for address in reversed(addresses):
+        try:
+            file_addresses = GFS_file_addresses(address)
+            if file_addresses:  # This date directory has files
+                return address
+        except Exception:
+            continue  # Skip this date if there's an error accessing it
+    
+    # If no date with files is found, return the most recent date (fallback)
+    if addresses:
+        return addresses[-1]
+    else:
+        raise ValueError("No GFS date addresses found")
 
 def GFS_file_addresses(date_URL: str = None, pattern: str = None) -> List[str]:
     if date_URL is None:
@@ -127,15 +156,23 @@ def GFS_file_addresses(date_URL: str = None, pattern: str = None) -> List[str]:
 def get_GFS_listing(date_URL: str = None) -> pd.DataFrame:
     if date_URL is None:
         date_URL = GFS_most_recent_date_address()
+
+    logger.info(f"getting GFS listing from date URL: {cl.URL(date_URL)}")
     
     addresses = GFS_file_addresses(date_URL)
+    
+    # Handle empty addresses list
+    if len(addresses) == 0:
+        # Return empty DataFrame with correct column structure
+        return pd.DataFrame(columns=["forecast_time_UTC", "address"])
+    
     address_df = pd.DataFrame({"address": addresses})
     address_df["basename"] = address_df.address.apply(lambda address: posixpath.basename(address))
     address_df["source_date_UTC"] = address_df.basename.apply(lambda basename: datetime.strptime(basename.split("_")[2], "%Y%m%d"))
     address_df["source_hour"] = address_df.basename.apply(lambda basename: int(basename.split("_")[3][:2]))
-    address_df["source_datetime_UTC"] = address_df.apply(lambda row: row.source_date_UTC + timedelta(hours=row.source_hour), axis=1)
+    address_df["source_datetime_UTC"] = address_df["source_date_UTC"] + pd.to_timedelta(address_df["source_hour"], unit='h')
     address_df["forecast_hours"] = address_df.basename.apply(lambda basename: int(splitext(basename)[0].split("_")[-1]))
-    address_df["forecast_time_UTC"] = address_df.apply(lambda row: row.source_datetime_UTC + timedelta(hours=row.forecast_hours), axis=1)
+    address_df["forecast_time_UTC"] = address_df["source_datetime_UTC"] + pd.to_timedelta(address_df["forecast_hours"], unit='h')
     address_df.sort_values(by=["forecast_time_UTC", "source_hour"], inplace=True)
     address_df.drop_duplicates(subset="forecast_time_UTC", keep="last", inplace=True)
     address_df = address_df[["forecast_time_UTC", "address"]]
@@ -206,10 +243,10 @@ def GFS_download(URL: str, filename: str = None, directory: str = None) -> str:
         filename = join(target_directory, posixpath.basename(URL))
     
     if exists(filename):
-        logger.info(f"file already downloaded: {colored_logging.file(filename)}")
+        logger.info(f"file already downloaded: {cl.file(filename)}")
         return filename
     
-    logger.info(f"downloading URL: {colored_logging.URL(URL)}")
+    logger.info(f"downloading URL: {cl.URL(URL)}")
 
     partial_filename = filename + ".download"
 
@@ -222,7 +259,7 @@ def GFS_download(URL: str, filename: str = None, directory: str = None) -> str:
     if not exists(filename):
         raise ConnectionError(f"unable to download URL: {URL}")
 
-    logger.info(f"downloaded file: {colored_logging.file(filename)}")
+    logger.info(f"downloaded file: {cl.file(filename)}")
     
     return filename
 
@@ -250,7 +287,7 @@ def GFS_interpolate(
     before_after = GFS_before_after_addresses(time_UTC, listing=listing)
     
     before_address = before_after.iloc[0].address
-    logger.info(f"before URL: {colored_logging.URL(before_address)}")
+    logger.info(f"before URL: {cl.URL(before_address)}")
     before_time = parser.parse(str(before_after.iloc[0].forecast_time_UTC))
     before_filename = GFS_download(URL=before_address, directory=directory)
     
@@ -264,7 +301,7 @@ def GFS_interpolate(
     before_image = read_GFS(filename=before_filename, message=message, geometry=geometry, resampling=resampling)
 
     after_address = before_after.iloc[-1].address
-    logger.info(f"after URL: {colored_logging.URL(after_address)}")
+    logger.info(f"after URL: {cl.URL(after_address)}")
     after_time = parser.parse(str(before_after.iloc[-1].forecast_time_UTC))
     after_filename = GFS_download(URL=after_address, directory=directory)
     
