@@ -193,6 +193,27 @@ def earliest_time_UTC(listing: pd.DataFrame = None) -> datetime:
 def earliest_date_UTC(listing: pd.DataFrame = None) -> date:
     return earliest_time_UTC(listing=listing).date()
 
+def split_table_by_date(listing: pd.DataFrame, time_UTC: datetime) -> (pd.DataFrame, pd.DataFrame):
+    """
+    Splits a DataFrame into two parts: rows before and after a given datetime.
+
+    Args:
+        listing (pd.DataFrame): The DataFrame containing a 'forecast_time_UTC' column.
+        time_UTC (datetime): The cutoff datetime for splitting.
+
+    Returns:
+        Tuple[pd.DataFrame, pd.DataFrame]: Two DataFrames, one with rows before and one with rows after the cutoff datetime.
+    """
+    # Ensure forecast_time_UTC is a datetime object
+    if not pd.api.types.is_datetime64_any_dtype(listing['forecast_time_UTC']):
+        listing['forecast_time_UTC'] = pd.to_datetime(listing['forecast_time_UTC'])
+
+    before_rows = listing[listing['forecast_time_UTC'] <= time_UTC]
+    after_rows = listing[listing['forecast_time_UTC'] > time_UTC]
+
+    return before_rows, after_rows
+
+
 def GFS_before_after_addresses(time_UTC: datetime, listing: pd.DataFrame = None) -> pd.DataFrame:
     if not isinstance(time_UTC, datetime):
         time_UTC = parser.parse(time_UTC)
@@ -200,31 +221,20 @@ def GFS_before_after_addresses(time_UTC: datetime, listing: pd.DataFrame = None)
     if listing is None:
         listing = get_GFS_listing()
 
-    # print(len(listing))
-
     if len(listing) == 0:
         raise ValueError(f"zero-length GFS listing at time {time_UTC} UTC")
-    
-    # min_time = min(listing.forecast_time_UTC)
-    # max_time = max(listing.forecast_time_UTC)
 
-    # logger.info(f"selecting GFS files for time {time_UTC} UTC between {min_time} UTC and {max_time} UTC")
+    before_rows, after_rows = split_table_by_date(listing, time_UTC)
 
-    # before = listing[listing.forecast_time_UTC <= time_UTC].iloc[[-1]]
-    before_rows = listing[listing.forecast_time_UTC.apply(lambda forecast_time_UTC: str(forecast_time_UTC) <= str(time_UTC))]
-    
     if len(before_rows) == 0:
         raise ValueError(f"no GFS files found before time {time_UTC} UTC")
-    
-    before = before_rows.iloc[[-1]]
-    
-    after_rows = listing[listing.forecast_time_UTC.apply(lambda forecast_time_UTC: str(forecast_time_UTC) > str(time_UTC))]
-    
+
     if len(after_rows) == 0:
         raise ValueError(f"no GFS files found after time {time_UTC} UTC")
 
+    before = before_rows.iloc[[-1]]
     after = after_rows.iloc[[0]]
-    
+
     before_after = pd.concat([before, after])
 
     return before_after
